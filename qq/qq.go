@@ -25,7 +25,8 @@ const (
 )
 
 type QQ struct {
-	cookie string
+	cookie     string
+	isVipCache *bool
 }
 
 func New(cookie string) *QQ { return &QQ{cookie: cookie} }
@@ -49,6 +50,93 @@ func Parse(link string) (*model.Song, error)       { return defaultQQ.Parse(link
 
 // GetRecommendedPlaylists 获取推荐歌单
 func GetRecommendedPlaylists() ([]model.Playlist, error) { return defaultQQ.GetRecommendedPlaylists() }
+
+func (q *QQ) IsVipAccount() (bool, error) {
+	if q.isVipCache != nil {
+		return *q.isVipCache, nil
+	}
+
+	if q.cookie == "" {
+		isVip := false
+		q.isVipCache = &isVip
+		return false, nil
+	}
+
+	// 生成随机 GUID 避免被风控
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	guid := fmt.Sprintf("%d", r.Int63n(9000000000)+1000000000)
+
+	// 探针: 周杰伦 - 晴天
+	songMID := "004YZbkL2MNHoY"
+	filename := fmt.Sprintf("F000%s%s.flac", songMID, songMID)
+
+	reqData := map[string]interface{}{
+		"comm": map[string]interface{}{
+			"cv":          4747474,
+			"ct":          24,
+			"format":      "json",
+			"inCharset":   "utf-8",
+			"outCharset":  "utf-8",
+			"notice":      0,
+			"platform":    "yqq.json",
+			"needNewCode": 1,
+			"uin":         0, // 如果能从 cookie 解析真实 uin 替换这里最好
+		},
+		"req_1": map[string]interface{}{
+			"module": "music.vkey.GetVkey",
+			"method": "UrlGetVkey",
+			"param": map[string]interface{}{
+				"guid":      guid, // 使用随机 guid
+				"songmid":   []string{songMID},
+				"songtype":  []int{0},
+				"uin":       "0",
+				"loginflag": 1,
+				"platform":  "20",
+				"filename":  []string{filename},
+			},
+		},
+	}
+
+	jsonData, _ := json.Marshal(reqData)
+	headers := []utils.RequestOption{
+		utils.WithHeader("User-Agent", UserAgent),
+		utils.WithHeader("Referer", DownloadReferer),
+		utils.WithHeader("Content-Type", "application/json"),
+		utils.WithHeader("Cookie", q.cookie),
+	}
+
+	body, err := utils.Post("https://u.y.qq.com/cgi-bin/musicu.fcg", bytes.NewReader(jsonData), headers...)
+	if err != nil {
+		return false, err // 网络错误，不缓存
+	}
+
+	var result struct {
+		Req1 struct {
+			Code int `json:"code"`
+			Data struct {
+				MidUrlInfo []struct {
+					Purl string `json:"purl"`
+				} `json:"midurlinfo"`
+			} `json:"data"`
+		} `json:"req_1"`
+	}
+
+	if err := json.Unmarshal(body, &result); err != nil {
+		return false, err // 解析错误，不缓存
+	}
+
+	// 只有在明确拿到结构体时才进行判断
+	isVip := false
+	if len(result.Req1.Data.MidUrlInfo) > 0 && result.Req1.Data.MidUrlInfo[0].Purl != "" {
+		isVip = true
+	} else if result.Req1.Code != 0 {
+		// 如果接口明确返回错误码（如风控或参数错误），建议不写入缓存，或记录日志
+		return false, fmt.Errorf("api returned error code: %d", result.Req1.Code)
+	}
+
+	q.isVipCache = &isVip
+	return isVip, nil
+}
 
 // Search 搜索歌曲
 func (q *QQ) Search(keyword string) ([]model.Song, error) {
@@ -98,9 +186,12 @@ func (q *QQ) Search(keyword string) ([]model.Song, error) {
 		return nil, fmt.Errorf("qq json parse error: %w", err)
 	}
 
+	isVip, _ := q.IsVipAccount()
+
 	var songs []model.Song
 	for _, item := range resp.Data.Song.List {
-		if item.Pay.PayPlay == 1 {
+		// 如果不是VIP，且歌曲需要付费播放，则过滤该歌曲
+		if !isVip && item.Pay.PayPlay == 1 {
 			continue
 		}
 
@@ -504,62 +595,97 @@ func (q *QQ) GetDownloadURL(s *model.Song) (string, error) {
 
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	guid := fmt.Sprintf("%d", r.Int63n(9000000000)+1000000000)
-	type Rate struct {
-		Prefix string
-		Ext    string
+
+	// 智能批处理：越靠前音质越好，返回匹配到的最靠前的有效链接
+	var prefixes []string
+	var exts []string
+
+	isVip, _ := q.IsVipAccount()
+	if isVip {
+		prefixes = []string{"AI00", "Q001", "Q000", "F000", "O801", "M800", "M500"} // Master, Atmos5.1, Atmos2.0, FLAC, 640k, 320k, 128k
+		exts = []string{"flac", "flac", "flac", "flac", "ogg", "mp3", "mp3"}
+	} else {
+		prefixes = []string{"M800", "M500"} // Non-VIPs typically only reach 128kbps natively unless the track is free 320k
+		exts = []string{"mp3", "mp3"}
 	}
-	rates := []Rate{{"M500", "mp3"}, {"C400", "m4a"}}
-	var lastErr string
 
-	for _, rate := range rates {
-		filename := fmt.Sprintf("%s%s%s.%s", rate.Prefix, songMID, songMID, rate.Ext)
+	var filenames []string
+	var songmids []string
+	var songtypes []int
 
-		reqData := map[string]interface{}{
-			"comm":  map[string]interface{}{"cv": 4747474, "ct": 24, "format": "json", "inCharset": "utf-8", "outCharset": "utf-8", "notice": 0, "platform": "yqq.json", "needNewCode": 1, "uin": 0, "g_tk_new_20200303": 5381, "g_tk": 5381},
-			"req_1": map[string]interface{}{"module": "music.vkey.GetVkey", "method": "UrlGetVkey", "param": map[string]interface{}{"guid": guid, "songmid": []string{songMID}, "songtype": []int{0}, "uin": "0", "loginflag": 1, "platform": "20", "filename": []string{filename}}},
-		}
+	for i := range prefixes {
+		filename := fmt.Sprintf("%s%s%s.%s", prefixes[i], songMID, songMID, exts[i])
+		filenames = append(filenames, filename)
+		songmids = append(songmids, songMID)
+		songtypes = append(songtypes, 0)
+	}
 
-		jsonData, _ := json.Marshal(reqData)
-		headers := []utils.RequestOption{
-			utils.WithHeader("User-Agent", UserAgent),
-			utils.WithHeader("Referer", DownloadReferer),
-			utils.WithHeader("Content-Type", "application/json"),
-			utils.WithHeader("Cookie", q.cookie),
-		}
+	reqData := map[string]interface{}{
+		"comm": map[string]interface{}{
+			"cv":          4747474,
+			"ct":          24,
+			"format":      "json",
+			"inCharset":   "utf-8",
+			"outCharset":  "utf-8",
+			"notice":      0,
+			"platform":    "yqq.json",
+			"needNewCode": 1,
+			"uin":         0,
+		},
+		"req_1": map[string]interface{}{
+			"module": "music.vkey.GetVkey",
+			"method": "UrlGetVkey",
+			"param": map[string]interface{}{
+				"guid":      guid,
+				"songmid":   songmids,
+				"songtype":  songtypes,
+				"uin":       "0",
+				"loginflag": 1,
+				"platform":  "20",
+				"filename":  filenames,
+			},
+		},
+	}
 
-		body, err := utils.Post("https://u.y.qq.com/cgi-bin/musicu.fcg", bytes.NewReader(jsonData), headers...)
-		if err != nil {
-			lastErr = err.Error()
-			continue
-		}
+	jsonData, _ := json.Marshal(reqData)
+	headers := []utils.RequestOption{
+		utils.WithHeader("User-Agent", UserAgent),
+		utils.WithHeader("Referer", DownloadReferer),
+		utils.WithHeader("Content-Type", "application/json"),
+		utils.WithHeader("Cookie", q.cookie),
+	}
 
-		var result struct {
-			Req1 struct {
-				Data struct {
-					MidUrlInfo []struct {
-						Purl    string `json:"purl"`
-						WifiUrl string `json:"wifiurl"`
-						Result  int    `json:"result"`
-						ErrMsg  string `json:"errtype"`
-					} `json:"midurlinfo"`
-				} `json:"data"`
-			} `json:"req_1"`
-		}
+	body, err := utils.Post("https://u.y.qq.com/cgi-bin/musicu.fcg", bytes.NewReader(jsonData), headers...)
+	if err != nil {
+		return "", err
+	}
 
-		if err := json.Unmarshal(body, &result); err != nil {
-			lastErr = "json parse error"
-			continue
-		}
-		if len(result.Req1.Data.MidUrlInfo) > 0 {
-			info := result.Req1.Data.MidUrlInfo[0]
-			if info.Purl == "" {
-				lastErr = fmt.Sprintf("empty purl (result code: %d)", info.Result)
-				continue
+	var result struct {
+		Req1 struct {
+			Data struct {
+				MidUrlInfo []struct {
+					Filename string `json:"filename"`
+					Purl     string `json:"purl"`
+				} `json:"midurlinfo"`
+			} `json:"data"`
+		} `json:"req_1"`
+	}
+
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("qq geturl json parse error: %w", err)
+	}
+
+	// Because we passed the filenames cleanly prioritized down from best to worst, the mapped return array technically aligns 1:1.
+	// We'll iterate the initial array order we asked for and grab the first `Filename` that successfully gave a `Purl`.
+	for _, expectedFilename := range filenames {
+		for _, info := range result.Req1.Data.MidUrlInfo {
+			if info.Filename == expectedFilename && info.Purl != "" {
+				return "https://ws.stream.qqmusic.qq.com/" + info.Purl, nil
 			}
-			return "http://ws.stream.qqmusic.qq.com/" + info.Purl, nil
 		}
 	}
-	return "", fmt.Errorf("download url not found: %s", lastErr)
+
+	return "", errors.New("no valid download url found or vip required")
 }
 
 // fetchSongDetail 内部方法：通过 songmid 获取详情

@@ -9,6 +9,7 @@ import (
 	"github.com/guohuiyuan/music-lib/bilibili"
 	"github.com/guohuiyuan/music-lib/model"
 	"github.com/guohuiyuan/music-lib/netease"
+	"github.com/guohuiyuan/music-lib/qq"
 )
 
 // getEnvCookie Helper function to parse .env file from the root
@@ -127,4 +128,28 @@ func TestBilibiliVIPHiRes(t *testing.T) {
 	}
 
 	fmt.Printf("Bilibili Hi-Res Stream Download URL: %s\n", url[:120]+"...")
+}
+
+func TestQQVIPStatusAndDownload(t *testing.T) {
+	cookie := getEnvCookie("QQ_COOKIE")
+	q := qq.New(cookie)
+
+	isVip, err := q.IsVipAccount()
+	if err != nil {
+		t.Fatalf("IsVipAccount error: %v", err)
+	}
+	fmt.Printf("QQ Account IsVip: %v\n", isVip)
+
+	// 周杰伦 - 晴天 (Known VIP Track)
+	song := &model.Song{
+		ID:     "0039MnYb0qxYhV",
+		Source: "qq",
+	}
+
+	url, err := q.GetDownloadURL(song)
+	if err != nil {
+		t.Fatalf("Failed to fetch QQ stream: %v", err)
+	}
+
+	fmt.Printf("QQ Stream Download URL: %s\n", url[:120]+"...")
 }
