@@ -68,7 +68,7 @@ func (q *QQ) IsVipAccount() (bool, error) {
 
 	// 探针: 周杰伦 - 晴天 (VIP 专享歌曲)
 	songMID := "004YZbkL2MNHoY"
-	// ⚠️ 修改点：将 F000 (FLAC) 修改为 M500 (128kbps MP3) 
+	// ⚠️ 修改点：将 F000 (FLAC) 修改为 M500 (128kbps MP3)
 	// 普通绿钻可能没有 FLAC 权限，但只要是绿钻就必定能获取 VIP 歌曲的 M500 播放链接。
 	filename := fmt.Sprintf("M500%s%s.mp3", songMID, songMID)
 
@@ -105,6 +105,7 @@ func (q *QQ) IsVipAccount() (bool, error) {
 		utils.WithHeader("Referer", DownloadReferer),
 		utils.WithHeader("Content-Type", "application/json"),
 		utils.WithHeader("Cookie", q.cookie),
+		utils.WithRandomIPHeader(),
 	}
 
 	body, err := utils.Post("https://u.y.qq.com/cgi-bin/musicu.fcg", bytes.NewReader(jsonData), headers...)
@@ -139,6 +140,7 @@ func (q *QQ) IsVipAccount() (bool, error) {
 	q.isVipCache = &isVip
 	return isVip, nil
 }
+
 // Search 搜索歌曲
 func (q *QQ) Search(keyword string) ([]model.Song, error) {
 	params := url.Values{}
@@ -152,6 +154,7 @@ func (q *QQ) Search(keyword string) ([]model.Song, error) {
 		utils.WithHeader("User-Agent", UserAgent),
 		utils.WithHeader("Referer", SearchReferer),
 		utils.WithHeader("Cookie", q.cookie),
+		utils.WithRandomIPHeader(),
 	)
 	if err != nil {
 		return nil, err
@@ -255,6 +258,7 @@ func (q *QQ) SearchPlaylist(keyword string) ([]model.Playlist, error) {
 		utils.WithHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"),
 		utils.WithHeader("Referer", "https://y.qq.com/portal/search.html"),
 		utils.WithHeader("Cookie", q.cookie),
+		utils.WithRandomIPHeader(),
 	)
 	if err != nil {
 		return nil, err
@@ -361,6 +365,7 @@ func (q *QQ) GetRecommendedPlaylists() ([]model.Playlist, error) {
 		utils.WithHeader("Content-Type", "application/json"),
 		// 推荐接口通常不需要严格的 Cookie，但如果有则带上
 		utils.WithHeader("Cookie", q.cookie),
+		utils.WithRandomIPHeader(),
 	}
 
 	body, err := utils.Post("https://u.y.qq.com/cgi-bin/musicu.fcg", bytes.NewReader(jsonData), headers...)
@@ -452,6 +457,7 @@ func (q *QQ) fetchPlaylistDetail(id string) (*model.Playlist, []model.Song, erro
 		utils.WithHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"),
 		utils.WithHeader("Referer", "https://y.qq.com/"),
 		utils.WithHeader("Cookie", q.cookie),
+		utils.WithRandomIPHeader(),
 	)
 	if err != nil {
 		return nil, nil, err
@@ -654,6 +660,7 @@ func (q *QQ) GetDownloadURL(s *model.Song) (string, error) {
 		utils.WithHeader("Referer", DownloadReferer),
 		utils.WithHeader("Content-Type", "application/json"),
 		utils.WithHeader("Cookie", q.cookie),
+		utils.WithRandomIPHeader(),
 	}
 
 	body, err := utils.Post("https://u.y.qq.com/cgi-bin/musicu.fcg", bytes.NewReader(jsonData), headers...)
@@ -700,6 +707,7 @@ func (q *QQ) fetchSongDetail(songMID string) (*model.Song, error) {
 		utils.WithHeader("User-Agent", UserAgent),
 		utils.WithHeader("Referer", SearchReferer),
 		utils.WithHeader("Cookie", q.cookie),
+		utils.WithRandomIPHeader(),
 	)
 	if err != nil {
 		return nil, err
@@ -782,6 +790,7 @@ func (q *QQ) GetLyrics(s *model.Song) (string, error) {
 		utils.WithHeader("Referer", LyricReferer),
 		utils.WithHeader("User-Agent", UserAgent),
 		utils.WithHeader("Cookie", q.cookie),
+		utils.WithRandomIPHeader(),
 	}
 
 	body, err := utils.Get(apiURL, headers...)
