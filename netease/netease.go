@@ -488,8 +488,10 @@ func (n *Netease) GetDownloadURL(s *model.Song) (string, error) {
 	// 1. 判断账号是否是VIP，如果是VIP则走eapi接口获取高音质
 	isVip, _ := n.IsVipAccount()
 	if isVip {
-		// 尝试获取无损 (lossless) 或极高音质 (exhigh) 下载链接
-		if url, err := n.getEAPIDownloadURL(songID, "lossless"); err == nil && url != "" {
+		// 尝试获取 Hi-Res (hires), 无损 (lossless) 或极高音质 (exhigh) 下载链接
+		if url, err := n.getEAPIDownloadURL(songID, "hires"); err == nil && url != "" {
+			return url, nil
+		} else if url, err := n.getEAPIDownloadURL(songID, "lossless"); err == nil && url != "" {
 			return url, nil
 		} else if url, err := n.getEAPIDownloadURL(songID, "exhigh"); err == nil && url != "" {
 			return url, nil
