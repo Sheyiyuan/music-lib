@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/md5"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -62,7 +63,7 @@ func aesEncryptECB(origData []byte, key []byte) []byte {
 	block, _ := aes.NewCipher(key)
 	// 补码
 	origData = pkcs7Padding(origData, block.BlockSize())
-	
+
 	crypted := make([]byte, len(origData))
 	// 手动循环加密每个块
 	for bs, be := 0, block.BlockSize(); bs < len(origData); bs, be = bs+block.BlockSize(), be+block.BlockSize() {
@@ -97,7 +98,7 @@ func rsaEncrypt(text, pubKey, modulus string) string {
 	text = reverseString(text)
 	// 2. 转为 hex
 	hexText := hex.EncodeToString([]byte(text))
-	
+
 	// 3. 大数运算
 	biText := new(big.Int)
 	biText.SetString(hexText, 16)
@@ -110,7 +111,7 @@ func rsaEncrypt(text, pubKey, modulus string) string {
 
 	// exp = text^pub % mod
 	biRet := new(big.Int).Exp(biText, biPub, biMod)
-	
+
 	// 4. 补齐 256 位 hex
 	return fmt.Sprintf("%0256x", biRet)
 }
@@ -141,4 +142,23 @@ func EncryptWeApi(text string) (string, string) {
 	encSecKey := rsaEncrypt(secKey, weApiPubKey, weApiPubModulus)
 
 	return params, encSecKey
+}
+
+// EncryptEApi 对应 Python: encrypt_params
+// 用于 EAPI 接口 (如获取高音质 VIP 下载链接)
+func EncryptEApi(urlPath string, payload string) string {
+	urlPath = strings.ReplaceAll(urlPath, "/eapi/", "/api/")
+	text := fmt.Sprintf("nobody%suse%smd5forencrypt", urlPath, payload)
+
+	hasher := md5.New()
+	hasher.Write([]byte(text))
+	digest := hex.EncodeToString(hasher.Sum(nil))
+
+	data := fmt.Sprintf("%s-36cd479b6b5-%s-36cd479b6b5-%s", urlPath, payload, digest)
+
+	eapiKey := []byte("e82ckenh8dichen8")
+	encrypted := aesEncryptECB([]byte(data), eapiKey)
+
+	// Python original uses lower case hex string for eapi
+	return hex.EncodeToString(encrypted)
 }

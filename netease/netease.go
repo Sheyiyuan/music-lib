@@ -17,13 +17,16 @@ const (
 	Referer                = "http://music.163.com/"
 	SearchAPI              = "http://music.163.com/api/linux/forward"
 	DownloadAPI            = "http://music.163.com/weapi/song/enhance/player/url"
+	DownloadEAPI           = "https://interface.music.163.com/eapi/song/enhance/player/url/v1"
 	DetailAPI              = "https://music.163.com/weapi/v3/song/detail"
 	PlaylistAPI            = "https://music.163.com/weapi/v3/playlist/detail"
+	UserAccountAPI         = "https://music.163.com/weapi/nuser/account/get"
 	RecommendedPlaylistAPI = "https://music.163.com/weapi/personalized/playlist" // 新增：推荐歌单API
 )
 
 type Netease struct {
-	cookie string
+	cookie     string
+	isVipCache *bool
 }
 
 func New(cookie string) *Netease { return &Netease{cookie: cookie} }
@@ -47,6 +50,54 @@ func Parse(link string) (*model.Song, error)       { return defaultNetease.Parse
 // GetRecommendedPlaylists 新增：获取推荐歌单（无需登录）
 func GetRecommendedPlaylists() ([]model.Playlist, error) {
 	return defaultNetease.GetRecommendedPlaylists()
+}
+
+// IsVipAccount 判断当前账号(cookie)是否为VIP
+func (n *Netease) IsVipAccount() (bool, error) {
+	if n.isVipCache != nil {
+		return *n.isVipCache, nil
+	}
+
+	if n.cookie == "" {
+		isVip := false
+		n.isVipCache = &isVip
+		return false, nil
+	}
+
+	reqData := map[string]interface{}{
+		"csrf_token": "",
+	}
+	reqJSON, _ := json.Marshal(reqData)
+	params, encSecKey := EncryptWeApi(string(reqJSON))
+	form := url.Values{}
+	form.Set("params", params)
+	form.Set("encSecKey", encSecKey)
+
+	headers := []utils.RequestOption{
+		utils.WithHeader("Referer", Referer),
+		utils.WithHeader("Content-Type", "application/x-www-form-urlencoded"),
+		utils.WithHeader("Cookie", n.cookie),
+	}
+
+	body, err := utils.Post(UserAccountAPI, strings.NewReader(form.Encode()), headers...)
+	if err != nil {
+		return false, fmt.Errorf("failed to fetch user account info: %w", err)
+	}
+
+	var resp struct {
+		Code    int `json:"code"`
+		Profile struct {
+			VipType int `json:"vipType"`
+		} `json:"profile"`
+	}
+
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return false, fmt.Errorf("netease user account json parse error: %w", err)
+	}
+
+	isVip := resp.Code == 200 && resp.Profile.VipType != 0
+	n.isVipCache = &isVip
+	return isVip, nil
 }
 
 // Search 搜索歌曲
@@ -86,8 +137,9 @@ func (n *Netease) Search(keyword string) ([]model.Song, error) {
 				} `json:"al"`
 				Dt        int `json:"dt"`
 				Privilege struct {
-					Fl int `json:"fl"`
-					Pl int `json:"pl"`
+					Fl  int `json:"fl"`
+					Pl  int `json:"pl"`
+					Fee int `json:"fee"`
 				} `json:"privilege"`
 				H struct {
 					Size int64 `json:"size"`
@@ -107,9 +159,16 @@ func (n *Netease) Search(keyword string) ([]model.Song, error) {
 	}
 
 	var songs []model.Song
+	isVip, _ := n.IsVipAccount()
+
 	for _, item := range resp.Result.Songs {
 		// 简单过滤无版权或收费歌曲 (Privilege.Fl == 0)
 		if item.Privilege.Fl == 0 {
+			continue
+		}
+
+		// 如果账号不是VIP，则过滤掉VIP专享歌曲 (Privilege.Fee == 1)
+		if !isVip && item.Privilege.Fee == 1 {
 			continue
 		}
 
@@ -431,6 +490,18 @@ func (n *Netease) GetDownloadURL(s *model.Song) (string, error) {
 		songID = s.Extra["song_id"]
 	}
 
+	// 1. 判断账号是否是VIP，如果是VIP则走eapi接口获取高音质
+	isVip, _ := n.IsVipAccount()
+	if isVip {
+		// 尝试获取无损 (lossless) 或极高音质 (exhigh) 下载链接
+		if url, err := n.getEAPIDownloadURL(songID, "lossless"); err == nil && url != "" {
+			return url, nil
+		} else if url, err := n.getEAPIDownloadURL(songID, "exhigh"); err == nil && url != "" {
+			return url, nil
+		}
+	}
+
+	// 2. 非VIP 或 eapi 失败的话回退到原来的 weapi
 	reqData := map[string]interface{}{
 		"ids": []string{songID},
 		"br":  320000,
@@ -464,6 +535,55 @@ func (n *Netease) GetDownloadURL(s *model.Song) (string, error) {
 	}
 	if len(resp.Data) == 0 || resp.Data[0].URL == "" {
 		return "", errors.New("download url not found (might be vip or copyright restricted)")
+	}
+	return resp.Data[0].URL, nil
+}
+
+// getEAPIDownloadURL 使用eapi接口获取高音质下载链接
+func (n *Netease) getEAPIDownloadURL(songID string, quality string) (string, error) {
+	idNum, err := strconv.Atoi(songID)
+	if err != nil {
+		return "", fmt.Errorf("invalid song id: %v", err)
+	}
+
+	headerJSON := `{"os":"pc","appver":"","osver":"","deviceId":"pyncm!","requestId":"12345678"}`
+
+	payload := map[string]interface{}{
+		"ids":        []int{idNum},
+		"level":      quality,
+		"encodeType": "flac",
+		"header":     headerJSON,
+	}
+
+	payloadBytes, _ := json.Marshal(payload)
+	params := EncryptEApi(DownloadEAPI, string(payloadBytes))
+
+	form := url.Values{}
+	form.Set("params", params)
+
+	headers := []utils.RequestOption{
+		utils.WithHeader("Referer", Referer),
+		utils.WithHeader("Content-Type", "application/x-www-form-urlencoded"),
+		utils.WithHeader("Cookie", n.cookie),
+	}
+
+	body, err := utils.Post(DownloadEAPI, strings.NewReader(form.Encode()), headers...)
+	if err != nil {
+		return "", err
+	}
+
+	var resp struct {
+		Data []struct {
+			URL  string `json:"url"`
+			Code int    `json:"code"`
+		} `json:"data"`
+	}
+
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return "", fmt.Errorf("eapi json parse error: %w", err)
+	}
+	if len(resp.Data) == 0 || resp.Data[0].URL == "" {
+		return "", errors.New("eapi download url not found")
 	}
 	return resp.Data[0].URL, nil
 }
@@ -576,7 +696,7 @@ func (n *Netease) GetRecommendedPlaylists() ([]model.Playlist, error) {
 			Cover:       item.PicURL,
 			PlayCount:   int(item.PlayCount),
 			TrackCount:  item.TrackCount,
-			Description: item.Copywriter, 
+			Description: item.Copywriter,
 			Creator:     creatorDisplay, // [修改] 使用推荐语代替作者名
 			Link:        fmt.Sprintf("https://music.163.com/#/playlist?id=%d", item.ID),
 			Extra:       map[string]string{},
