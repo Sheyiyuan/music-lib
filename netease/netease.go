@@ -163,12 +163,7 @@ func (n *Netease) Search(keyword string) ([]model.Song, error) {
 
 	for _, item := range resp.Result.Songs {
 		// 简单过滤无版权或收费歌曲 (Privilege.Fl == 0)
-		if item.Privilege.Fl == 0 {
-			continue
-		}
-
-		// 如果账号不是VIP，则过滤掉VIP专享歌曲 (Privilege.Fee == 1)
-		if !isVip && item.Privilege.Fee == 1 {
+		if !isVip && item.Privilege.Fl == 0 {
 			continue
 		}
 
