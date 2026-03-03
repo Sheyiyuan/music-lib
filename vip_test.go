@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/guohuiyuan/music-lib/model"
 	"github.com/guohuiyuan/music-lib/netease"
 	"github.com/guohuiyuan/music-lib/qq"
+	"github.com/guohuiyuan/music-lib/utils"
 )
 
 // getEnvCookie Helper function to parse .env file from the root
@@ -27,23 +29,43 @@ func getEnvCookie(key string) string {
 	return ""
 }
 
+func isStandardFLAC(data []byte) bool {
+	return len(data) >= 4 && bytes.Equal(data[:4], []byte{'f', 'L', 'a', 'C'})
+}
+
+func saveTempFLAC(prefix string, data []byte) (string, error) {
+	f, err := os.CreateTemp("", prefix+"-*.flac")
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	if _, err := f.Write(data); err != nil {
+		return "", err
+	}
+
+	return f.Name(), nil
+}
+
 func TestNeteaseVIPStatusAndDownload(t *testing.T) {
 	cookie := getEnvCookie("NETEASE_COOKIE")
 	n := netease.New(cookie)
 
-	// Jay Chou's song - usually VIP exclusive
-	vipKeyword := "稻香"
-	songs, err := n.Search(vipKeyword)
+	parsedSong, err := n.Parse("https://music.163.com/#/song?id=29732995")
 	if err != nil {
-		t.Fatalf("Search error: %v", err)
+		t.Fatalf("Parse error: %v", err)
 	}
+	if parsedSong == nil {
+		t.Fatalf("Parse returned nil song")
+	}
+	fmt.Printf("Parsed song %s by %s, ID: %s\n", parsedSong.Name, parsedSong.Artist, parsedSong.ID)
 
-	var vipSongID string
-	if len(songs) > 0 {
-		vipSongID = songs[0].ID
-		fmt.Printf("Found song %s by %s, ID: %s\n", songs[0].Name, songs[0].Artist, vipSongID)
-	} else {
-		t.Fatalf("No songs found for keyword: %s", vipKeyword)
+	if parsedSong.URL == "" {
+		downloadURL, getErr := n.GetDownloadURL(parsedSong)
+		if getErr != nil {
+			t.Fatalf("GetDownloadURL error: %v", getErr)
+		}
+		parsedSong.URL = downloadURL
 	}
 
 	isVip, err := n.IsVipAccount()
@@ -52,20 +74,51 @@ func TestNeteaseVIPStatusAndDownload(t *testing.T) {
 	}
 	fmt.Printf("Account IsVip: %v\n", isVip)
 
-	song := &model.Song{
-		ID:     vipSongID,
-		Source: "netease",
-		Extra: map[string]string{
-			"song_id": vipSongID,
-		},
+	audioData, err := utils.Get(
+		parsedSong.URL,
+		utils.WithHeader("Referer", netease.Referer),
+		utils.WithHeader("Cookie", cookie),
+	)
+	if err != nil {
+		t.Fatalf("Download error: %v", err)
+	}
+	if len(audioData) == 0 {
+		t.Fatalf("Downloaded audio is empty")
+	}
+	fmt.Printf("Downloaded %d bytes from parsed URL\n", len(audioData))
+	fmt.Printf("Raw header check: standard FLAC=%v (first4=%q)\n", isStandardFLAC(audioData), string(audioData[:4]))
+
+	if isStandardFLAC(audioData) {
+		flacPath, saveErr := saveTempFLAC("netease-raw", audioData)
+		if saveErr != nil {
+			t.Fatalf("Save temp FLAC error: %v", saveErr)
+		}
+		fmt.Printf("Raw FLAC saved to: %s\n", flacPath)
+		fmt.Printf("Raw data is already standard FLAC, skip decrypt\n")
+		return
 	}
 
-	url, err := n.GetDownloadURL(song)
-	if err != nil {
-		t.Logf("GetDownloadURL error (expected without VIP cookie): %v", err)
-	} else {
-		fmt.Printf("VIP Song %s Download URL: %s\n", vipSongID, url)
+	if len(audioData) < 8 || string(audioData[:8]) != "CTENFDAM" {
+		t.Logf("Raw data is not standard FLAC and does not match NCM header, skip decrypt")
+		return
 	}
+
+	decrypted, outExt, err := netease.DecryptNCM(audioData)
+	if err != nil {
+		t.Fatalf("Decrypt NCM error: %v", err)
+	}
+
+	if len(decrypted) == 0 {
+		t.Fatalf("Decrypted audio is empty")
+	}
+	fmt.Printf("Decrypted %d bytes, source=netease, ext=%s\n", len(decrypted), outExt)
+	fmt.Printf("Decrypted header check: standard FLAC=%v (first4=%q)\n", isStandardFLAC(decrypted), string(decrypted[:4]))
+
+	flacPath, saveErr := saveTempFLAC("netease-decrypted", decrypted)
+	if saveErr != nil {
+		t.Fatalf("Save decrypted temp FLAC error: %v", saveErr)
+	}
+	fmt.Printf("Decrypted audio saved to: %s\n", flacPath)
 }
 
 func TestBilibiliVIPStatusAndDownload(t *testing.T) {
