@@ -77,6 +77,7 @@ func (n *Netease) IsVipAccount() (bool, error) {
 		utils.WithHeader("Referer", Referer),
 		utils.WithHeader("Content-Type", "application/x-www-form-urlencoded"),
 		utils.WithHeader("Cookie", n.cookie),
+		utils.WithRandomIPHeader(),
 	}
 
 	body, err := utils.Post(UserAccountAPI, strings.NewReader(form.Encode()), headers...)
@@ -116,6 +117,7 @@ func (n *Netease) Search(keyword string) ([]model.Song, error) {
 		utils.WithHeader("Referer", Referer),
 		utils.WithHeader("Content-Type", "application/x-www-form-urlencoded"),
 		utils.WithHeader("Cookie", n.cookie),
+		utils.WithRandomIPHeader(),
 	}
 
 	body, err := utils.Post(SearchAPI, strings.NewReader(form.Encode()), headers...)
@@ -223,6 +225,7 @@ func (n *Netease) SearchPlaylist(keyword string) ([]model.Playlist, error) {
 		utils.WithHeader("Referer", Referer),
 		utils.WithHeader("Content-Type", "application/x-www-form-urlencoded"),
 		utils.WithHeader("Cookie", n.cookie),
+		utils.WithRandomIPHeader(),
 	}
 
 	body, err := utils.Post(SearchAPI, strings.NewReader(form.Encode()), headers...)
@@ -301,6 +304,7 @@ func (n *Netease) fetchPlaylistDetail(playlistID string) (*model.Playlist, []mod
 		utils.WithHeader("Referer", Referer),
 		utils.WithHeader("Content-Type", "application/x-www-form-urlencoded"),
 		utils.WithHeader("Cookie", n.cookie),
+		utils.WithRandomIPHeader(),
 	}
 
 	body, err := utils.Post(PlaylistAPI, strings.NewReader(form.Encode()), headers...)
@@ -401,6 +405,7 @@ func (n *Netease) fetchSongsBatch(songIDs []string) ([]model.Song, error) {
 		utils.WithHeader("Referer", Referer),
 		utils.WithHeader("Content-Type", "application/x-www-form-urlencoded"),
 		utils.WithHeader("Cookie", n.cookie),
+		utils.WithRandomIPHeader(),
 	}
 
 	body, err := utils.Post(DetailAPI, strings.NewReader(form.Encode()), headers...)
@@ -513,6 +518,7 @@ func (n *Netease) GetDownloadURL(s *model.Song) (string, error) {
 		utils.WithHeader("Referer", Referer),
 		utils.WithHeader("Content-Type", "application/x-www-form-urlencoded"),
 		utils.WithHeader("Cookie", n.cookie),
+		utils.WithRandomIPHeader(),
 	}
 
 	body, err := utils.Post(DownloadAPI, strings.NewReader(form.Encode()), headers...)
@@ -562,6 +568,7 @@ func (n *Netease) getEAPIDownloadURL(songID string, quality string) (string, err
 		utils.WithHeader("Referer", Referer),
 		utils.WithHeader("Content-Type", "application/x-www-form-urlencoded"),
 		utils.WithHeader("Cookie", n.cookie),
+		utils.WithRandomIPHeader(),
 	}
 
 	body, err := utils.Post(DownloadEAPI, strings.NewReader(form.Encode()), headers...)
@@ -612,6 +619,7 @@ func (n *Netease) GetLyrics(s *model.Song) (string, error) {
 		utils.WithHeader("Referer", Referer),
 		utils.WithHeader("Content-Type", "application/x-www-form-urlencoded"),
 		utils.WithHeader("Cookie", n.cookie),
+		utils.WithRandomIPHeader(),
 	}
 
 	lyricAPI := "https://music.163.com/weapi/song/lyric"
@@ -652,6 +660,7 @@ func (n *Netease) GetRecommendedPlaylists() ([]model.Playlist, error) {
 		utils.WithHeader("Referer", Referer),
 		utils.WithHeader("Content-Type", "application/x-www-form-urlencoded"),
 		// 此接口不需要 Cookie
+		utils.WithRandomIPHeader(),
 	}
 
 	body, err := utils.Post(RecommendedPlaylistAPI, strings.NewReader(form.Encode()), headers...)

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/guohuiyuan/music-lib/bilibili"
+	"github.com/guohuiyuan/music-lib/kugou"
 	"github.com/guohuiyuan/music-lib/model"
 	"github.com/guohuiyuan/music-lib/netease"
 	"github.com/guohuiyuan/music-lib/qq"
@@ -205,4 +206,58 @@ func TestQQVIPStatusAndDownload(t *testing.T) {
 	}
 
 	fmt.Printf("QQ Stream Download URL: %s\n", url[:120]+"...")
+}
+
+func TestKugouVIPStatusAndDownload(t *testing.T) {
+	cookie := getEnvCookie("KUGOU_COOKIE")
+	if cookie == "" {
+		t.Skip("KUGOU_COOKIE not set")
+	}
+	k := kugou.New(cookie)
+
+	songs, err := k.Search("无敌")
+	if err != nil {
+		t.Skipf("Search error: %v", err)
+	}
+	if len(songs) == 0 {
+		t.Skip("No songs found for keyword")
+	}
+
+	song := songs[0]
+	fmt.Printf("Found Kugou song %s by %s, ID: %s\n", song.Name, song.Artist, song.ID)
+	fmt.Printf("Candidate hashes: sq=%s, hq=%s, hash=%s\n", song.Extra["sq_hash"], song.Extra["hq_hash"], song.Extra["hash"])
+
+	url, err := k.GetDownloadURL(&song)
+	if err != nil {
+		t.Fatalf("GetDownloadURL error: %v", err)
+	}
+
+	isVip, err := k.IsVipAccount()
+	if err != nil {
+		t.Fatalf("IsVipAccount error: %v", err)
+	}
+	fmt.Printf("Kugou Account IsVip: %v\n", isVip)
+	fmt.Printf("Kugou Download URL: %s\n", url[:min(120, len(url))])
+
+	audioData, err := utils.Get(
+		url,
+		utils.WithHeader("Referer", "https://www.kugou.com/"),
+		utils.WithHeader("Cookie", cookie),
+	)
+	if err != nil {
+		t.Fatalf("Download error: %v", err)
+	}
+	if len(audioData) == 0 {
+		t.Fatalf("Downloaded audio is empty")
+	}
+
+	ext := song.Ext
+	if ext == "" {
+		if strings.Contains(strings.ToLower(url), ".flac") {
+			ext = "flac"
+		} else {
+			ext = "mp3"
+		}
+	}
+	fmt.Printf("Downloaded %d bytes, ext=%s, standard FLAC=%v\n", len(audioData), ext, isStandardFLAC(audioData))
 }

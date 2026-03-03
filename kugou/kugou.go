@@ -17,10 +17,12 @@ import (
 const (
 	MobileUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 13_2_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.0.3 Mobile/15E148 Safari/604.1"
 	MobileReferer   = "http://m.kugou.com"
+	PCUserAgent     = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
 )
 
 type Kugou struct {
-	cookie string
+	cookie     string
+	isVipCache *bool
 }
 
 func New(cookie string) *Kugou { return &Kugou{cookie: cookie} }
@@ -28,6 +30,7 @@ func New(cookie string) *Kugou { return &Kugou{cookie: cookie} }
 var defaultKugou = New("")
 
 func Search(keyword string) ([]model.Song, error) { return defaultKugou.Search(keyword) }
+func IsVipAccount() (bool, error)                 { return defaultKugou.IsVipAccount() }
 func SearchPlaylist(keyword string) ([]model.Playlist, error) {
 	return defaultKugou.SearchPlaylist(keyword)
 }
@@ -46,6 +49,21 @@ func Parse(link string) (*model.Song, error)       { return defaultKugou.Parse(l
 // GetRecommendedPlaylists 获取推荐歌单
 func GetRecommendedPlaylists() ([]model.Playlist, error) {
 	return defaultKugou.GetRecommendedPlaylists()
+}
+
+// IsVipAccount 返回当前 cookie 是否已经探测到可用的 VIP 音质链路。
+func (k *Kugou) IsVipAccount() (bool, error) {
+	if k.isVipCache != nil {
+		return *k.isVipCache, nil
+	}
+
+	if strings.TrimSpace(k.cookie) == "" {
+		isVip := false
+		k.isVipCache = &isVip
+		return false, nil
+	}
+
+	return false, nil
 }
 
 // Search 搜索歌曲
@@ -79,6 +97,8 @@ func (k *Kugou) Search(keyword string) ([]model.Song, error) {
 				FileHash   string      `json:"FileHash"`
 				SQFileHash string      `json:"SQFileHash"`
 				HQFileHash string      `json:"HQFileHash"`
+				SQFileSize int64       `json:"SQFileSize"`
+				HQFileSize int64       `json:"HQFileSize"`
 				FileSize   interface{} `json:"FileSize"`
 				Image      string      `json:"Image"`
 				PayType    int         `json:"PayType"`
@@ -123,6 +143,13 @@ func (k *Kugou) Search(keyword string) ([]model.Song, error) {
 		if item.Duration > 0 && size > 0 {
 			bitrate = int(size * 8 / 1000 / int64(item.Duration))
 		}
+		if isValidHash(item.SQFileHash) && item.SQFileSize > 0 && item.Duration > 0 {
+			size = item.SQFileSize
+			bitrate = int(item.SQFileSize * 8 / 1000 / int64(item.Duration))
+		} else if isValidHash(item.HQFileHash) && item.HQFileSize > 0 && item.Duration > 0 {
+			size = item.HQFileSize
+			bitrate = int(item.HQFileSize * 8 / 1000 / int64(item.Duration))
+		}
 
 		coverURL := strings.Replace(item.Image, "{size}", "240", 1)
 
@@ -138,7 +165,11 @@ func (k *Kugou) Search(keyword string) ([]model.Song, error) {
 			Cover:    coverURL,
 			Link:     fmt.Sprintf("https://www.kugou.com/song/#hash=%s", finalHash),
 			Extra: map[string]string{
-				"hash": finalHash,
+				"hash":         finalHash,
+				"file_hash":    item.FileHash,
+				"hq_hash":      item.HQFileHash,
+				"sq_hash":      item.SQFileHash,
+				"requires_vip": strconv.FormatBool(item.PayType > 0 || item.Privilege > 0),
 			},
 		})
 	}
@@ -400,11 +431,37 @@ func (k *Kugou) GetDownloadURL(s *model.Song) (string, error) {
 		hash = s.Extra["hash"]
 	}
 
+	if info, err := k.fetchVIPSongInfo(s); err == nil && info != nil && info.URL != "" {
+		return info.URL, nil
+	}
+
 	info, err := k.fetchSongInfo(hash)
 	if err != nil {
 		return "", err
 	}
 	return info.URL, nil
+}
+
+func (k *Kugou) fetchVIPSongInfo(s *model.Song) (*model.Song, error) {
+	if strings.TrimSpace(k.cookie) == "" {
+		return nil, errors.New("cookie required for kugou vip download")
+	}
+
+	for _, hash := range collectCandidateHashes(s) {
+		info, err := k.fetchTrackerSongInfo(hash)
+		if err != nil || info == nil || info.URL == "" {
+			continue
+		}
+		if looksLossless(info.Ext, info.Bitrate, info.Size) {
+			isVip := true
+			k.isVipCache = &isVip
+		}
+		return info, nil
+	}
+
+	isVip := false
+	k.isVipCache = &isVip
+	return nil, errors.New("kugou vip download url not found")
 }
 
 // fetchSongInfo 内部核心逻辑：获取详情和 URL
@@ -472,6 +529,75 @@ func (k *Kugou) fetchSongInfo(hash string) (*model.Song, error) {
 }
 
 // fallbackFetchSongInfo 备用 API：如果原接口被风控 (1002)，使用 PC 网页端 API 进行 Fallback
+func (k *Kugou) fetchTrackerSongInfo(hash string) (*model.Song, error) {
+	hash = strings.ToLower(strings.TrimSpace(hash))
+	if !isValidHash(hash) {
+		return nil, errors.New("invalid kugou hash")
+	}
+
+	apiURLs := []string{
+		fmt.Sprintf("https://trackercdn.kugou.com/i/v2/?cdnBackup=1&behavior=download&pid=1&cmd=21&appid=1001&hash=%s&key=%s", hash, utils.MD5(hash+"kgcloudv2")),
+		fmt.Sprintf("http://trackercdnbj.kugou.com/i/v2/?cmd=23&pid=1&behavior=download&hash=%s&key=%s", hash, utils.MD5(hash+"kgcloudv2")),
+		fmt.Sprintf("http://trackercdn.kugou.com/i/?cmd=4&pid=1&forceDown=0&vip=1&hash=%s&key=%s", hash, utils.MD5(hash+"kgcloud")),
+	}
+
+	for _, apiURL := range apiURLs {
+		body, err := utils.Get(apiURL,
+			utils.WithHeader("User-Agent", PCUserAgent),
+			utils.WithHeader("Referer", "https://www.kugou.com/"),
+			utils.WithHeader("Cookie", k.cookie),
+			utils.WithRandomIPHeader(),
+		)
+		if err != nil {
+			continue
+		}
+
+		var resp struct {
+			Status    int         `json:"status"`
+			Errcode   int         `json:"errcode"`
+			URL       interface{} `json:"url"`
+			BackupURL interface{} `json:"backup_url"`
+			BitRate   int         `json:"bitRate"`
+			ExtName   string      `json:"extName"`
+			AlbumImg  string      `json:"album_img"`
+			SongName  string      `json:"songName"`
+			Author    string      `json:"author_name"`
+			FileSize  int64       `json:"fileSize"`
+			TimeLen   int         `json:"timeLength"`
+		}
+		if err := json.Unmarshal(body, &resp); err != nil {
+			continue
+		}
+
+		downloadURL := pickKugouURL(resp.URL)
+		if downloadURL == "" {
+			downloadURL = pickKugouURL(resp.BackupURL)
+		}
+		if downloadURL == "" || resp.Errcode != 0 {
+			continue
+		}
+
+		return &model.Song{
+			Source:   "kugou",
+			ID:       hash,
+			Name:     resp.SongName,
+			Artist:   resp.Author,
+			Duration: normalizeKugouDuration(resp.TimeLen),
+			Size:     resp.FileSize,
+			Bitrate:  normalizeKugouBitrate(resp.BitRate),
+			Ext:      normalizeKugouExt(resp.ExtName, downloadURL),
+			Cover:    strings.Replace(resp.AlbumImg, "{size}", "240", 1),
+			URL:      downloadURL,
+			Link:     fmt.Sprintf("https://www.kugou.com/song/#hash=%s", hash),
+			Extra: map[string]string{
+				"hash": hash,
+			},
+		}, nil
+	}
+
+	return nil, errors.New("tracker kugou download url not found")
+}
+
 func (k *Kugou) fallbackFetchSongInfo(hash string) (*model.Song, error) {
 	// 酷狗 PC Web API, 有时可以绕过部分验证
 	apiURL := fmt.Sprintf("https://wwwapi.kugou.com/yy/index.php?r=play/getdata&hash=%s&platid=4", hash)
@@ -598,4 +724,85 @@ func (k *Kugou) GetLyrics(s *model.Song) (string, error) {
 
 func isValidHash(h string) bool {
 	return h != "" && h != "00000000000000000000000000000000"
+}
+
+func collectCandidateHashes(s *model.Song) []string {
+	var hashes []string
+	if s.Extra != nil {
+		hashes = append(hashes, s.Extra["sq_hash"], s.Extra["hash"], s.Extra["hq_hash"], s.Extra["file_hash"])
+	}
+	hashes = append(hashes, s.ID)
+
+	seen := make(map[string]struct{}, len(hashes))
+	result := make([]string, 0, len(hashes))
+	for _, hash := range hashes {
+		hash = strings.ToLower(strings.TrimSpace(hash))
+		if !isValidHash(hash) {
+			continue
+		}
+		if _, ok := seen[hash]; ok {
+			continue
+		}
+		seen[hash] = struct{}{}
+		result = append(result, hash)
+	}
+	return result
+}
+
+func pickKugouURL(v interface{}) string {
+	switch u := v.(type) {
+	case string:
+		return u
+	case []interface{}:
+		for _, item := range u {
+			if s, ok := item.(string); ok && s != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+func normalizeKugouDuration(v int) int {
+	if v > 1000 {
+		return v / 1000
+	}
+	return v
+}
+
+func normalizeKugouBitrate(v int) int {
+	if v > 1000 {
+		return v / 1000
+	}
+	return v
+}
+
+func normalizeKugouExt(extName, downloadURL string) string {
+	extName = strings.ToLower(strings.TrimSpace(extName))
+	if extName != "" {
+		return extName
+	}
+
+	parsed, err := url.Parse(downloadURL)
+	if err != nil {
+		return ""
+	}
+	path := strings.ToLower(parsed.Path)
+	switch {
+	case strings.HasSuffix(path, ".flac"):
+		return "flac"
+	case strings.HasSuffix(path, ".ape"):
+		return "ape"
+	case strings.HasSuffix(path, ".mp3"):
+		return "mp3"
+	}
+	return ""
+}
+
+func looksLossless(ext string, bitrate int, size int64) bool {
+	ext = strings.ToLower(strings.TrimSpace(ext))
+	if ext == "flac" || ext == "ape" || ext == "wav" {
+		return true
+	}
+	return bitrate >= 700 || size >= 20*1024*1024
 }
