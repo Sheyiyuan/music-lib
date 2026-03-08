@@ -163,18 +163,13 @@ func (k *Kugou) Search(keyword string) ([]model.Song, error) {
 
 	var songs []model.Song
 	for _, item := range resp.Data.Lists {
-		if !isVip && item.Privilege == 10 {
-			continue
-		}
-		if item.FileHash == "" && item.SQFileHash == "" && item.HQFileHash == "" {
+		if item.Privilege == 10 && !isVip {
 			continue
 		}
 
 		finalHash := item.FileHash
-		if isValidHash(item.SQFileHash) {
+		if item.Privilege != 10 && isVip {
 			finalHash = item.SQFileHash
-		} else if isValidHash(item.HQFileHash) {
-			finalHash = item.HQFileHash
 		}
 
 		var size int64
@@ -189,16 +184,13 @@ func (k *Kugou) Search(keyword string) ([]model.Song, error) {
 			}
 		}
 
+		if item.Duration > 0 && finalHash == item.SQFileHash && item.SQFileSize > 0 {
+			size = item.SQFileSize
+		}
+
 		bitrate := 0
 		if item.Duration > 0 && size > 0 {
 			bitrate = int(size * 8 / 1000 / int64(item.Duration))
-		}
-		if isValidHash(item.SQFileHash) && item.SQFileSize > 0 && item.Duration > 0 {
-			size = item.SQFileSize
-			bitrate = int(item.SQFileSize * 8 / 1000 / int64(item.Duration))
-		} else if isValidHash(item.HQFileHash) && item.HQFileSize > 0 && item.Duration > 0 {
-			size = item.HQFileSize
-			bitrate = int(item.HQFileSize * 8 / 1000 / int64(item.Duration))
 		}
 
 		coverURL := strings.Replace(item.Image, "{size}", "240", 1)
@@ -226,6 +218,7 @@ func (k *Kugou) Search(keyword string) ([]model.Song, error) {
 				"hq_hash":      item.HQFileHash,
 				"audio_id":     fmt.Sprint(item.Audioid),
 				"album_id":     item.AlbumID,
+				"privilege":    strconv.Itoa(item.Privilege),
 			},
 		})
 	}
@@ -629,7 +622,7 @@ func (k *Kugou) GetDownloadURL(s *model.Song) (string, error) {
 		hash = s.Extra["hash"]
 	}
 
-	if strings.TrimSpace(k.cookie) != "" {
+	if strings.TrimSpace(k.cookie) != "" && shouldUseKugouSonginfo(s) {
 		if info, err := k.fetchVIPSongInfo(s); err == nil && info != nil && info.URL != "" {
 			return info.URL, nil
 		}
@@ -1098,6 +1091,13 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func shouldUseKugouSonginfo(s *model.Song) bool {
+	if s == nil || s.Extra == nil {
+		return false
+	}
+	return strings.TrimSpace(s.Extra["privilege"]) == "10"
 }
 
 func pickKugouURL(v interface{}) string {
