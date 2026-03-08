@@ -322,9 +322,9 @@ func TestKugouVIPStatusAndDownload(t *testing.T) {
 	}
 	fmt.Printf("Download candidate hashes: %v\n", candidates)
 
-	url, err := k.GetDownloadURL(&song)
+	url, err := k.GetDownloadURLBySonginfo(&song)
 	if err != nil {
-		t.Fatalf("GetDownloadURL error: %v", err)
+		t.Fatalf("GetDownloadURLBySonginfo error: %v", err)
 	}
 
 	isVip, err := k.IsVipAccount()
