@@ -123,20 +123,28 @@ func (k *Kugou) Search(keyword string) ([]model.Song, error) {
 	var resp struct {
 		Data struct {
 			Lists []struct {
-				Scid       interface{} `json:"Scid"`
-				SongName   string      `json:"SongName"`
-				SingerName string      `json:"SingerName"`
-				AlbumName  string      `json:"AlbumName"`
-				Duration   int         `json:"Duration"`
-				FileHash   string      `json:"FileHash"`
-				SQFileHash string      `json:"SQFileHash"`
-				HQFileHash string      `json:"HQFileHash"`
-				SQFileSize int64       `json:"SQFileSize"`
-				HQFileSize int64       `json:"HQFileSize"`
-				FileSize   interface{} `json:"FileSize"`
-				Image      string      `json:"Image"`
-				PayType    int         `json:"PayType"`
-				Privilege  int         `json:"Privilege"`
+				Scid        interface{} `json:"Scid"`
+				SongName    string      `json:"SongName"`
+				SingerName  string      `json:"SingerName"`
+				AlbumName   string      `json:"AlbumName"`
+				AlbumID     string      `json:"AlbumID"`
+				Audioid     interface{} `json:"Audioid"`
+				Duration    int         `json:"Duration"`
+				FileHash    string      `json:"FileHash"`
+				SQFileHash  string      `json:"SQFileHash"`
+				HQFileHash  string      `json:"HQFileHash"`
+				ResFileHash string      `json:"ResFileHash"`
+				MvHash      string      `json:"MvHash"`
+				SQFileSize  int64       `json:"SQFileSize"`
+				HQFileSize  int64       `json:"HQFileSize"`
+				FileSize    interface{} `json:"FileSize"`
+				Image       string      `json:"Image"`
+				PayType     int         `json:"PayType"`
+				Privilege   int         `json:"Privilege"`
+				TransParam  struct {
+					Ogg320Hash string `json:"ogg_320_hash"`
+					Ogg128Hash string `json:"ogg_128_hash"`
+				} `json:"trans_param"`
 			} `json:"lists"`
 		} `json:"data"`
 	}
@@ -195,6 +203,7 @@ func (k *Kugou) Search(keyword string) ([]model.Song, error) {
 			Name:     item.SongName,
 			Artist:   item.SingerName,
 			Album:    item.AlbumName,
+			AlbumID:  item.AlbumID,
 			Duration: item.Duration,
 			Size:     size,
 			Bitrate:  bitrate,
@@ -202,10 +211,15 @@ func (k *Kugou) Search(keyword string) ([]model.Song, error) {
 			Link:     fmt.Sprintf("https://www.kugou.com/song/#hash=%s", finalHash),
 			Extra: map[string]string{
 				"hash":         finalHash,
-				"file_hash":    item.FileHash,
-				"hq_hash":      item.HQFileHash,
+				"ogg_320_hash": item.TransParam.Ogg320Hash,
+				"ogg_128_hash": item.TransParam.Ogg128Hash,
 				"sq_hash":      item.SQFileHash,
-				"requires_vip": strconv.FormatBool(item.PayType > 0 || item.Privilege > 0),
+				"file_hash":    item.FileHash,
+				"res_hash":     item.ResFileHash,
+				"mv_hash":      item.MvHash,
+				"hq_hash":      item.HQFileHash,
+				"audio_id":     fmt.Sprint(item.Audioid),
+				"album_id":     item.AlbumID,
 			},
 		})
 	}
@@ -278,14 +292,24 @@ func (k *Kugou) GetPlaylistSongs(id string) ([]model.Song, error) {
 // ParsePlaylist 解析歌单链接
 func (k *Kugou) ParsePlaylist(link string) (*model.Playlist, []model.Song, error) {
 	// 链接格式: https://www.kugou.com/yy/special/single/546903.html
-	re := regexp.MustCompile(`special/single/(\d+)\.html`)
-	matches := re.FindStringSubmatch(link)
-	if len(matches) < 2 {
+	switch {
+	case strings.Contains(link, "/yy/special/single/"):
+		re := regexp.MustCompile(`special/single/(\d+)\.html`)
+		matches := re.FindStringSubmatch(link)
+		if len(matches) < 2 {
+			return nil, nil, errors.New("invalid kugou playlist link")
+		}
+		return k.fetchPlaylistDetail(matches[1])
+	case strings.Contains(link, "/songlist/"):
+		re := regexp.MustCompile(`songlist/(gcid_[a-zA-Z0-9]+)`)
+		matches := re.FindStringSubmatch(link)
+		if len(matches) < 2 {
+			return nil, nil, errors.New("invalid kugou songlist link")
+		}
+		return k.fetchPlaylistDetail(matches[1])
+	default:
 		return nil, nil, errors.New("invalid kugou playlist link")
 	}
-	specialID := matches[1]
-
-	return k.fetchPlaylistDetail(specialID)
 }
 
 // GetRecommendedPlaylists 获取推荐歌单
@@ -356,6 +380,10 @@ func (k *Kugou) GetRecommendedPlaylists() ([]model.Playlist, error) {
 
 // fetchPlaylistDetail [内部复用] 获取歌单详情 (Metadata + Songs)
 func (k *Kugou) fetchPlaylistDetail(id string) (*model.Playlist, []model.Song, error) {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(id)), "gcid_") {
+		return k.fetchSonglistDetail(id)
+	}
+
 	apiURL := fmt.Sprintf("http://mobilecdn.kugou.com/api/v3/special/song?specialid=%s&page=1&pagesize=300&version=9108&area_code=1", id)
 
 	body, err := utils.Get(apiURL,
@@ -438,6 +466,134 @@ func (k *Kugou) fetchPlaylistDetail(id string) (*model.Playlist, []model.Song, e
 	}
 
 	playlist.TrackCount = len(songs)
+
+	return playlist, songs, nil
+}
+
+func (k *Kugou) fetchSonglistDetail(id string) (*model.Playlist, []model.Song, error) {
+	id = strings.TrimSpace(id)
+	apiURL := fmt.Sprintf("https://www.kugou.com/songlist/%s/", id)
+
+	body, err := utils.Get(apiURL,
+		utils.WithHeader("User-Agent", MobileUserAgent),
+		utils.WithHeader("Referer", MobileReferer),
+		utils.WithHeader("Cookie", k.cookie),
+		utils.WithRandomIPHeader(),
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	matches := regexp.MustCompile(`window\.\$output\s*=\s*({.*?})\s*;\s*</script>`).FindSubmatch(body)
+	if len(matches) < 2 {
+		return nil, nil, errors.New("kugou songlist payload not found")
+	}
+
+	var resp struct {
+		EncodeGIC string `json:"encode_gic"`
+		Info      struct {
+			ListInfo struct {
+				Name               string `json:"name"`
+				Pic                string `json:"pic"`
+				Intro              string `json:"intro"`
+				ListCreateUsername string `json:"list_create_username"`
+				Count              int    `json:"count"`
+				Heat               int    `json:"heat"`
+			} `json:"listinfo"`
+			Songs []struct {
+				Hash        string `json:"hash"`
+				Name        string `json:"name"`
+				Bitrate     int    `json:"bitrate"`
+				Size        int64  `json:"size"`
+				Timelen     int    `json:"timelen"`
+				Cover       string `json:"cover"`
+				Privilege   int    `json:"privilege"`
+				RelateGoods []struct {
+					Hash      string `json:"hash"`
+					Bitrate   int    `json:"bitrate"`
+					Privilege int    `json:"privilege"`
+					Size      int64  `json:"size"`
+				} `json:"relate_goods"`
+				SingerInfo []struct {
+					Name string `json:"name"`
+				} `json:"singerinfo"`
+				AlbumInfo struct {
+					Name string `json:"name"`
+				} `json:"albuminfo"`
+				TransParam struct {
+					UnionCover string `json:"union_cover"`
+				} `json:"trans_param"`
+			} `json:"songs"`
+		} `json:"info"`
+	}
+	if err := json.Unmarshal(matches[1], &resp); err != nil {
+		return nil, nil, fmt.Errorf("kugou songlist json parse error: %w", err)
+	}
+
+	playlistID := resp.EncodeGIC
+	if playlistID == "" {
+		playlistID = id
+	}
+	cover := strings.Replace(resp.Info.ListInfo.Pic, "{size}", "240", 1)
+	playlist := &model.Playlist{
+		Source:      "kugou",
+		ID:          playlistID,
+		Name:        resp.Info.ListInfo.Name,
+		Cover:       cover,
+		TrackCount:  resp.Info.ListInfo.Count,
+		PlayCount:   resp.Info.ListInfo.Heat,
+		Creator:     resp.Info.ListInfo.ListCreateUsername,
+		Description: resp.Info.ListInfo.Intro,
+		Link:        fmt.Sprintf("https://www.kugou.com/songlist/%s/", playlistID),
+	}
+
+	isVip, _ := k.IsVipAccount()
+	songs := make([]model.Song, 0, len(resp.Info.Songs))
+	for _, item := range resp.Info.Songs {
+		if !isVip && item.Privilege == 10 {
+			continue
+		}
+
+		fileHash, hqHash, sqHash, size, bitrate := pickSonglistHashes(item.Hash, item.Size, item.Bitrate, item.RelateGoods)
+		finalHash := fileHash
+		if isValidHash(sqHash) {
+			finalHash = sqHash
+		} else if isValidHash(hqHash) {
+			finalHash = hqHash
+		}
+		if !isValidHash(finalHash) {
+			continue
+		}
+
+		coverURL := item.Cover
+		if item.TransParam.UnionCover != "" {
+			coverURL = item.TransParam.UnionCover
+		}
+		coverURL = strings.Replace(coverURL, "{size}", "240", 1)
+
+		songs = append(songs, model.Song{
+			Source:   "kugou",
+			ID:       finalHash,
+			Name:     pickSonglistSongName(item.Name),
+			Artist:   joinSonglistArtists(item.SingerInfo),
+			Album:    item.AlbumInfo.Name,
+			Duration: normalizeKugouDuration(item.Timelen),
+			Size:     size,
+			Bitrate:  bitrate,
+			Cover:    coverURL,
+			Link:     fmt.Sprintf("https://www.kugou.com/song/#hash=%s", finalHash),
+			Extra: map[string]string{
+				"hash":      finalHash,
+				"file_hash": fileHash,
+				"hq_hash":   hqHash,
+				"sq_hash":   sqHash,
+			},
+		})
+	}
+
+	if playlist.TrackCount == 0 {
+		playlist.TrackCount = len(songs)
+	}
 
 	return playlist, songs, nil
 }
@@ -721,7 +877,17 @@ func isValidHash(h string) bool {
 func collectCandidateHashes(s *model.Song) []string {
 	var hashes []string
 	if s.Extra != nil {
-		hashes = append(hashes, s.Extra["sq_hash"], s.Extra["hash"], s.Extra["hq_hash"], s.Extra["file_hash"])
+		hashes = append(
+			hashes,
+			s.Extra["sq_hash"],
+			s.Extra["res_hash"],
+			s.Extra["hash"],
+			s.Extra["hq_hash"],
+			s.Extra["file_hash"],
+			s.Extra["ogg_320_hash"],
+			s.Extra["ogg_128_hash"],
+			s.Extra["mv_hash"],
+		)
 	}
 	hashes = append(hashes, s.ID)
 
@@ -797,4 +963,74 @@ func looksLossless(ext string, bitrate int, size int64) bool {
 		return true
 	}
 	return bitrate >= 700 || size >= 20*1024*1024
+}
+
+func pickSonglistHashes(defaultHash string, defaultSize int64, defaultBitrate int, goods []struct {
+	Hash      string `json:"hash"`
+	Bitrate   int    `json:"bitrate"`
+	Privilege int    `json:"privilege"`
+	Size      int64  `json:"size"`
+}) (fileHash, hqHash, sqHash string, size int64, bitrate int) {
+	fileHash = strings.TrimSpace(defaultHash)
+	size = defaultSize
+	bitrate = defaultBitrate
+
+	for _, item := range goods {
+		hash := strings.TrimSpace(item.Hash)
+		if !isValidHash(hash) {
+			continue
+		}
+
+		switch {
+		case item.Bitrate >= 700:
+			sqHash = hash
+			size = item.Size
+			bitrate = item.Bitrate
+		case item.Bitrate >= 320:
+			if sqHash == "" {
+				size = item.Size
+				bitrate = item.Bitrate
+			}
+			hqHash = hash
+		default:
+			if fileHash == "" {
+				fileHash = hash
+			}
+		}
+	}
+
+	if fileHash == "" {
+		if hqHash != "" {
+			fileHash = hqHash
+		} else if sqHash != "" {
+			fileHash = sqHash
+		}
+	}
+	return fileHash, hqHash, sqHash, size, bitrate
+}
+
+func joinSonglistArtists(artists []struct {
+	Name string `json:"name"`
+}) string {
+	if len(artists) == 0 {
+		return ""
+	}
+
+	names := make([]string, 0, len(artists))
+	for _, artist := range artists {
+		name := strings.TrimSpace(artist.Name)
+		if name == "" {
+			continue
+		}
+		names = append(names, name)
+	}
+	return strings.Join(names, "/")
+}
+
+func pickSonglistSongName(name string) string {
+	parts := strings.SplitN(name, " - ", 2)
+	if len(parts) == 2 && strings.TrimSpace(parts[1]) != "" {
+		return strings.TrimSpace(parts[1])
+	}
+	return strings.TrimSpace(name)
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -15,7 +16,11 @@ import (
 	"github.com/guohuiyuan/music-lib/utils"
 )
 
-// getEnvCookie Helper function to parse .env file from the root
+const (
+	kugouVIPArtistKeyword = "G.E.M. 邓紫棋"
+	kugouVIPSongName      = "唯一"
+)
+
 func getEnvCookie(key string) string {
 	b, err := os.ReadFile(".env")
 	if err != nil {
@@ -46,6 +51,53 @@ func saveTempFLAC(prefix string, data []byte) (string, error) {
 	}
 
 	return f.Name(), nil
+}
+
+func findKugouVIPTestSong(t *testing.T, k *kugou.Kugou) model.Song {
+	t.Helper()
+
+	songs, err := k.Search(kugouVIPArtistKeyword + " " + kugouVIPSongName)
+	if err != nil {
+		t.Skipf("Search error: %v", err)
+	}
+	if len(songs) == 0 {
+		t.Skip("No songs found for keyword")
+	}
+
+	for _, song := range songs {
+		name := strings.TrimSpace(song.Name)
+		artist := strings.TrimSpace(song.Artist)
+		if name != kugouVIPSongName {
+			continue
+		}
+		if !strings.Contains(artist, "邓紫棋") && !strings.Contains(artist, "G.E.M.") {
+			continue
+		}
+		return song
+	}
+
+	t.Skipf("No exact song match found for %s - %s", kugouVIPArtistKeyword, kugouVIPSongName)
+	return model.Song{}
+}
+
+func getKugouHashSnapshot(song model.Song) map[string]string {
+	snapshot := map[string]string{
+		"hash":         song.Extra["hash"],
+		"ogg_320_hash": song.Extra["ogg_320_hash"],
+		"ogg_128_hash": song.Extra["ogg_128_hash"],
+		"sq_hash":      song.Extra["sq_hash"],
+		"file_hash":    song.Extra["file_hash"],
+		"res_hash":     song.Extra["res_hash"],
+		"mv_hash":      song.Extra["mv_hash"],
+		"hq_hash":      song.Extra["hq_hash"],
+		"audio_id":     song.Extra["audio_id"],
+		"album_id":     song.Extra["album_id"],
+	}
+
+	if song.AlbumID != "" && snapshot["album_id"] == "" {
+		snapshot["album_id"] = song.AlbumID
+	}
+	return snapshot
 }
 
 func TestNeteaseVIPStatusAndDownload(t *testing.T) {
@@ -126,8 +178,7 @@ func TestBilibiliVIPStatusAndDownload(t *testing.T) {
 	cookie := getEnvCookie("BILIBILI_COOKIE")
 	b := bilibili.New(cookie)
 
-	// 周杰伦 Jay Chou music typically contains Hi-Res Bilibili audios
-	vipKeyword := "周杰伦"
+	vipKeyword := "Jay Chou"
 	songs, err := b.Search(vipKeyword)
 	if err != nil {
 		t.Fatalf("Search error: %v", err)
@@ -155,9 +206,10 @@ func TestBilibiliVIPStatusAndDownload(t *testing.T) {
 	url, err := b.GetDownloadURL(song)
 	if err != nil {
 		t.Logf("GetDownloadURL error: %v", err)
-	} else {
-		fmt.Printf("Bilibili Song %s Download URL: %s\n", vipSongID, url[:120]+"...") // Truncate to keep log clean
+		return
 	}
+
+	fmt.Printf("Bilibili Song %s Download URL: %s\n", vipSongID, url[:120]+"...")
 }
 
 func TestBilibiliVIPHiRes(t *testing.T) {
@@ -170,7 +222,6 @@ func TestBilibiliVIPHiRes(t *testing.T) {
 	}
 	fmt.Printf("Bilibili Account IsVip: %v\n", isVip)
 
-	// BV1rp4y1e745 is explicitly designated as having 30251 FLAC/Hi-Res tracks in Bilibili Docs
 	song := &model.Song{
 		ID:     "BV1rp4y1e745|244954665",
 		Source: "bilibili",
@@ -194,7 +245,6 @@ func TestQQVIPStatusAndDownload(t *testing.T) {
 	}
 	fmt.Printf("QQ Account IsVip: %v\n", isVip)
 
-	// 周杰伦 - 晴天 (Known VIP Track)
 	song := &model.Song{
 		ID:     "0039MnYb0qxYhV",
 		Source: "qq",
@@ -208,6 +258,29 @@ func TestQQVIPStatusAndDownload(t *testing.T) {
 	fmt.Printf("QQ Stream Download URL: %s\n", url[:120]+"...")
 }
 
+func TestKugouVIPSearchHashes(t *testing.T) {
+	cookie := getEnvCookie("KUGOU_COOKIE")
+	if cookie == "" {
+		t.Skip("KUGOU_COOKIE not set")
+	}
+	k := kugou.New(cookie)
+
+	song := findKugouVIPTestSong(t, k)
+	hashes := getKugouHashSnapshot(song)
+	fmt.Printf("Found Kugou song %s by %s, ID: %s\n", song.Name, song.Artist, song.ID)
+
+	order := []string{"hash", "ogg_320_hash", "ogg_128_hash", "sq_hash", "file_hash", "res_hash", "mv_hash", "hq_hash", "audio_id", "album_id"}
+	for _, key := range order {
+		fmt.Printf("%s=%s\n", key, hashes[key])
+	}
+
+	for _, key := range []string{"hash", "sq_hash", "file_hash", "res_hash", "hq_hash", "audio_id", "album_id"} {
+		if strings.TrimSpace(hashes[key]) == "" {
+			t.Fatalf("expected %s in extra, got empty", key)
+		}
+	}
+}
+
 func TestKugouVIPStatusAndDownload(t *testing.T) {
 	cookie := getEnvCookie("KUGOU_COOKIE")
 	if cookie == "" {
@@ -215,17 +288,39 @@ func TestKugouVIPStatusAndDownload(t *testing.T) {
 	}
 	k := kugou.New(cookie)
 
-	songs, err := k.Search("邓紫棋")
-	if err != nil {
-		t.Skipf("Search error: %v", err)
+	song := model.Song{
+		ID:      "83368470292244265486BF864701222C",
+		Name:    "唯一",
+		Artist:  "G.E.M. 邓紫棋",
+		Album:   "T.I.M.E.",
+		AlbumID: "82564821",
+		Source:  "kugou",
+		Extra: map[string]string{
+			"hash":         "83368470292244265486BF864701222C",
+			"ogg_320_hash": "878D0D6E847F402299D29D4295BC21CB",
+			"ogg_128_hash": "A76E5E3C04E98737DBDD0C8C550EDAE5",
+			"sq_hash":      "83368470292244265486BF864701222C",
+			"file_hash":    "AB05B8F658851282DCB2CBAD548AEB9B",
+			"res_hash":     "983AA9AF17E1688CC70EDEAAF6256D5B",
+			"mv_hash":      "4CDC3359A8D45114153D68F26AEF0A9A",
+			"hq_hash":      "7DD13522B6C143A39E10507B74B0A876",
+			"audio_id":     "281733352",
+			"album_id":     "82564821",
+		},
 	}
-	if len(songs) == 0 {
-		t.Skip("No songs found for keyword")
-	}
-
-	song := songs[0]
+	hashes := getKugouHashSnapshot(song)
 	fmt.Printf("Found Kugou song %s by %s, ID: %s\n", song.Name, song.Artist, song.ID)
-	fmt.Printf("Candidate hashes: sq=%s, hq=%s, hash=%s\n", song.Extra["sq_hash"], song.Extra["hq_hash"], song.Extra["hash"])
+
+	candidates := []string{
+		hashes["sq_hash"],
+		hashes["res_hash"],
+		hashes["hash"],
+		hashes["hq_hash"],
+		hashes["file_hash"],
+		hashes["ogg_320_hash"],
+		hashes["ogg_128_hash"],
+	}
+	fmt.Printf("Download candidate hashes: %v\n", candidates)
 
 	url, err := k.GetDownloadURL(&song)
 	if err != nil {
@@ -260,4 +355,13 @@ func TestKugouVIPStatusAndDownload(t *testing.T) {
 		}
 	}
 	fmt.Printf("Downloaded %d bytes, ext=%s, standard FLAC=%v\n", len(audioData), ext, isStandardFLAC(audioData))
+
+	lowerID := strings.ToLower(song.ID)
+	lowerCandidates := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		lowerCandidates = append(lowerCandidates, strings.ToLower(candidate))
+	}
+	if !slices.Contains(lowerCandidates, lowerID) {
+		t.Fatalf("song ID %s not found in candidate hashes %v", song.ID, candidates)
+	}
 }
